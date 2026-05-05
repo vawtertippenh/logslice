@@ -1,75 +1,94 @@
 package index
 
 import (
+	"os"
 	"sync"
 	"time"
 )
 
-// CacheEntry holds a cached index along with metadata about when it was built.
-type CacheEntry struct {
-	Index     *Index
-	BuiltAt   time.Time
-	FileSize  int64
-	FilePath  string
+// entry holds a cached Index along with its file modification time.
+type entry struct {
+	index   *Index
+	modTime time.Time
 }
 
-// Cache stores built indexes keyed by file path, allowing reuse across
-// multiple queries on the same file without rebuilding the index.
+// Cache stores built indexes keyed by file path and evicts entries using LRU
+// when the cache exceeds its configured capacity.
 type Cache struct {
-	mu      sync.RWMutex
-	entries map[string]*CacheEntry
+	mu      sync.Mutex
+	entries map[string]*entry
+	evict   *LRUEviction
 }
 
-// NewCache creates an empty index cache.
-func NewCache() *Cache {
+// NewCache creates a Cache that holds at most capacity indexes in memory.
+func NewCache(capacity int) *Cache {
 	return &Cache{
-		entries: make(map[string]*CacheEntry),
+		entries: make(map[string]*entry, capacity),
+		evict:   NewLRUEviction(capacity),
 	}
 }
 
-// Get retrieves a cached index entry for the given file path.
-// Returns nil, false if no entry exists.
-func (c *Cache) Get(filePath string) (*CacheEntry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	entry, ok := c.entries[filePath]
-	return entry, ok
-}
-
-// Put stores an index entry in the cache for the given file path.
-func (c *Cache) Put(filePath string, idx *Index, fileSize int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[filePath] = &CacheEntry{
-		Index:    idx,
-		BuiltAt:  time.Now(),
-		FileSize: fileSize,
-		FilePath: filePath,
+// Put stores an index for the given file path.
+func (c *Cache) Put(path string, idx *Index) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
 	}
-}
-
-// Invalidate removes the cached entry for the given file path.
-func (c *Cache) Invalidate(filePath string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.entries, filePath)
+
+	if evicted := c.evict.Touch(path); evicted != "" {
+		delete(c.entries, evicted)
+	}
+	c.entries[path] = &entry{index: idx, modTime: info.ModTime()}
+	return nil
 }
 
-// IsStale returns true if the cached entry's recorded file size differs
-// from the provided current size, indicating the file has changed.
-func (c *Cache) IsStale(filePath string, currentSize int64) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	entry, ok := c.entries[filePath]
+// Get retrieves a cached index. Returns nil, false if not present or stale.
+func (c *Cache) Get(path string) (*Index, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	e, ok := c.entries[path]
+	if !ok {
+		return nil, false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.ModTime().After(e.modTime) {
+		c.evict.Remove(path)
+		delete(c.entries, path)
+		return nil, false
+	}
+	c.evict.Touch(path)
+	return e.index, true
+}
+
+// Invalidate removes a cached entry for the given path.
+func (c *Cache) Invalidate(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.evict.Remove(path)
+	delete(c.entries, path)
+}
+
+// IsStale reports whether the cached entry for path is outdated.
+func (c *Cache) IsStale(path string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[path]
 	if !ok {
 		return true
 	}
-	return entry.FileSize != currentSize
+	info, err := os.Stat(path)
+	if err != nil {
+		return true
+	}
+	return info.ModTime().After(e.modTime)
 }
 
 // Len returns the number of entries currently in the cache.
 func (c *Cache) Len() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return len(c.entries)
 }
