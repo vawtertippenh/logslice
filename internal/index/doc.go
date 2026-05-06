@@ -1,20 +1,25 @@
-// Package index implements byte-offset indexing for log files.
+// Package index provides time-based indexing for large log files.
 //
-// The index maps timestamps to byte offsets within a log file, allowing
-// the scanner to seek directly to the approximate start of a time range
-// rather than reading from the beginning of the file.
+// # Overview
 //
-// Usage:
+// An Index maps sampled timestamps to byte offsets within a log file, enabling
+// efficient seeking without scanning the entire file from the beginning.
 //
-//	// Build an index by sampling every 100th line
-//	builder := index.NewBuilder(100)
-//	idx, err := builder.Build(file)
+// # Components
 //
-//	// Find the start offset for a time range
-//	startOffset := idx.FindStart(startTime)
-//	file.Seek(startOffset, io.SeekStart)
+//   - Index / Builder: core data structure and construction from a log stream.
+//   - Searcher: binary-search helpers to locate the start/end offset for a
+//     given time range within an Index.
+//   - Cache / TTLCache: in-memory caches for Index values, with optional LRU
+//     eviction (Cache) or time-to-live expiry (TTLCache).
+//   - LRUEviction: doubly-linked-list LRU policy used by Cache.
+//   - Merger: combines multiple Index values into one, deduplicating entries.
+//   - Stats / Collector: runtime metrics (hit rate, duration, empty checks)
+//     collected concurrently and readable at any time.
 //
-// The sample rate controls the trade-off between index size and seek
-// precision. A lower sample rate produces a more precise index but uses
-// more memory. For most use cases, sampling every 50-200 lines works well.
+// # Usage
+//
+// Build an index with NewBuilder, seek into it with NewSearcher, and cache the
+// result with NewCache or NewTTLCache to avoid rebuilding on repeated queries
+// against the same file.
 package index
