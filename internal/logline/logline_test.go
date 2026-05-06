@@ -48,3 +48,18 @@ func TestLogLineInRange(t *testing.T) {
 		t.Error("expected InRange == false for zero-timestamp line")
 	}
 }
+
+func TestLogLineInRangeBoundaryExact(t *testing.T) {
+	base := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+	ll := LogLine{Timestamp: base, Raw: "msg"}
+
+	// Timestamp exactly equal to start should be in range
+	if !ll.InRange(base, base.Add(time.Hour)) {
+		t.Error("expected InRange == true when timestamp equals start")
+	}
+
+	// Timestamp exactly equal to end should be in range
+	if !ll.InRange(base.Add(-time.Hour), base) {
+		t.Error("expected InRange == true when timestamp equals end")
+	}
+}
