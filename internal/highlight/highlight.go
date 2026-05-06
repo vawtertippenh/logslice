@@ -66,3 +66,28 @@ func (h *Highlighter) Apply(line string) string {
 func (h *Highlighter) Enabled() bool {
 	return h.pattern != nil
 }
+
+// Strip removes all ANSI escape sequences from s, returning plain text.
+// This is useful when writing highlighted output to a file or a
+// non-terminal destination where escape codes would appear as raw bytes.
+func Strip(s string) string {
+	var sb strings.Builder
+	for len(s) > 0 {
+		idx := strings.IndexByte(s, '\033')
+		if idx == -1 {
+			sb.WriteString(s)
+			break
+		}
+		sb.WriteString(s[:idx])
+		// Skip past the escape sequence: ESC '[' ... letter
+		s = s[idx:]
+		end := strings.IndexFunc(s, func(r rune) bool {
+			return r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
+		})
+		if end == -1 {
+			break
+		}
+		s = s[end+1:]
+	}
+	return sb.String()
+}
