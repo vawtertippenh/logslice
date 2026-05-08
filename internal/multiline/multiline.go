@@ -1,73 +1,87 @@
-// Package multiline provides support for grouping multi-line log entries
-// into a single logical record before filtering or output.
-//
-// Some log formats (e.g. Java stack traces, Python tracebacks) emit a single
-// logical event across multiple physical lines. A Joiner accumulates lines
-// until a configurable start-of-record pattern is matched, then emits the
-// previously accumulated group as one joined string.
 package multiline
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 )
 
-// Options controls Joiner behaviour.
+// Options controls aggregator behaviour.
 type Options struct {
-	// StartPattern is a regular expression that marks the first line of a new
-	// logical record. Every line that matches begins a fresh group.
-	StartPattern *regexp.Regexp
+	// StartPattern is a regular expression that matches the first line of a
+	// new log record.  Lines that do NOT match are treated as continuations
+	// of the previous record.
+	StartPattern string
 
-	// Separator is placed between physical lines when joining. Defaults to "\n".
+	// MaxLines caps how many physical lines are joined into one record.
+	// Zero means no limit.
+	MaxLines int
+
+	// Separator is placed between joined lines (default: "\n").
 	Separator string
 }
 
-// Joiner accumulates physical log lines and emits logical records.
-type Joiner struct {
-	opts    Options
-	buf     []string
-	pending string
+// Aggregator joins continuation lines into complete log records.
+type Aggregator struct {
+	start    *regexp.Regexp
+	maxLines int
+	sep      string
+	buf      []string
 }
 
-// New creates a Joiner with the provided options.
-// StartPattern must be non-nil.
-func New(opts Options) *Joiner {
-	if opts.Separator == "" {
-		opts.Separator = "\n"
+// New creates an Aggregator from opts.  StartPattern must be a valid regexp.
+func New(opts Options) (*Aggregator, error) {
+	if opts.StartPattern == "" {
+		return nil, errors.New("multiline: StartPattern must not be empty")
 	}
-	return &Joiner{opts: opts}
-}
-
-// Add feeds the next physical line to the Joiner.
-// If the line starts a new record, the previously buffered record is returned
-// together with ok=true. Otherwise ok is false and the caller should continue
-// feeding lines.
-func (j *Joiner) Add(line string) (record string, ok bool) {
-	if j.opts.StartPattern.MatchString(line) {
-		if len(j.buf) > 0 {
-			record = strings.Join(j.buf, j.opts.Separator)
-			ok = true
-		}
-		j.buf = []string{line}
-		return
+	re, err := regexp.Compile(opts.StartPattern)
+	if err != nil {
+		return nil, err
 	}
-	j.buf = append(j.buf, line)
-	return
-}
-
-// Flush returns any remaining buffered lines as a final record.
-// It should be called after the input is exhausted.
-func (j *Joiner) Flush() (record string, ok bool) {
-	if len(j.buf) == 0 {
-		return
+	sep := opts.Separator
+	if sep == "" {
+		sep = "\n"
 	}
-	record = strings.Join(j.buf, j.opts.Separator)
-	ok = true
-	j.buf = nil
-	return
+	return &Aggregator{
+		start:    re,
+		maxLines: opts.MaxLines,
+		sep:      sep,
+	}, nil
 }
 
-// Reset clears all buffered state, ready for a new input stream.
-func (j *Joiner) Reset() {
-	j.buf = nil
+// Feed accepts a raw line.  If feeding this line completes a previous record,
+// that record is returned with ok == true.  Otherwise ok is false.
+func (a *Aggregator) Feed(line string) (record string, ok bool) {
+	isStart := a.start.MatchString(line)
+
+	if isStart && len(a.buf) > 0 {
+		record = strings.Join(a.buf, a.sep)
+		a.buf = []string{line}
+		return record, true
+	}
+
+	a.buf = append(a.buf, line)
+
+	// Force flush when the buffer hits the line cap.
+	if a.maxLines > 0 && len(a.buf) >= a.maxLines {
+		return a.Flush()
+	}
+
+	return "", false
+}
+
+// Flush returns any buffered lines as a completed record and resets the buffer.
+// Call this after the input is exhausted to retrieve the final record.
+func (a *Aggregator) Flush() (record string, ok bool) {
+	if len(a.buf) == 0 {
+		return "", false
+	}
+	record = strings.Join(a.buf, a.sep)
+	a.buf = a.buf[:0]
+	return record, true
+}
+
+// Reset discards any buffered state.
+func (a *Aggregator) Reset() {
+	a.buf = a.buf[:0]
 }
